@@ -1,14 +1,14 @@
 Name:           python-ldap
 Version:        3.3.0
 Release:        0%{?dist}
-License:        Python
+License:        python-ldap
 Summary:        An object-oriented API to access LDAP directory servers
 Source0:        %{pypi_source}
 
 # OpenLDAP 2.5+ is not yet supported by python-ldap
 # https://github.com/python-ldap/python-ldap/issues/432
 # Fedora has this patch to make it build, but the tests will fail anyway
-Patch0:         https://src.fedoraproject.org/rpms/python-ldap/raw/a237d9b212bd1581e07f4f1a8f54c26a7190843c/f/python-ldap-always-use-ldap-library.patch
+Patch0:         python-ldap-always-use-ldap-library.patch
 
 BuildRequires:  python3-devel
 BuildRequires:  pyproject-rpm-macros
@@ -95,8 +95,6 @@ grep -E '/site-packages/__pycache__/$' %{pyproject_files} && exit 1 || true
 
 # Internal check for the value of %%{pyproject_build_lib} in an archful package
 %if 0%{?rhel} == 9
-test "%{pyproject_build_lib}" == "$(echo %{_pyproject_builddir}/pip-req-build-*/build/lib.%{python3_platform}-%{python3_version})"
-%elif 0%{?fedora} == 36
 test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/build/lib.%{python3_platform}-%{python3_version}"
 %else
 test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/build/lib.%{python3_platform}-cpython-%{python3_version_nodots}"

@@ -137,12 +137,11 @@ def add_file_to_module(paths, module_name, module_type, files_dirs, *files):
     """
     for module in paths["modules"][module_name]:
         if module["type"] == module_type:
-            if files[0] not in module[files_dirs]:
-                module[files_dirs].extend(files)
+            module[files_dirs].update(files)
             break
     else:
         paths["modules"][module_name].append(
-            {"type": module_type, "files": [], "dirs": [], files_dirs: list(files)}
+            {"type": module_type, "files": set(), "dirs": set(), files_dirs: set(files)}
         )
 
 
@@ -348,7 +347,7 @@ def classify_paths(
             "docs": [],  # to be used once there is upstream way to recognize READMEs
             "licenses": [],  # %license entries parsed from dist-info METADATA file
         },
-        "lang": {}, # %lang entries: [module_name or None][language_code] lists of .mo files
+        "lang": {}, # %lang entries: [module_name or None][language_code] lists of .mo and .qm files
         "modules": defaultdict(list),  # each importable module (directory, .py, .so)
         "module_names": set(),  # qualified names of each importable module ("foo.bar.baz")
         "other": {"files": []},  # regular %file entries we could not parse :(
@@ -357,7 +356,7 @@ def classify_paths(
     license_files = metadata.get_all('License-File')
     license_directory = distinfo / 'licenses'  # See PEP 639 "Root License Directory"
     # setuptools was the first known build backend to implement License-File.
-    # Unfortunately they don't put licenses to the license directory (yet):
+    # Unfortunately they didn't put licenses to the license directory in setuptools<78:
     #     https://github.com/pypa/setuptools/issues/3596
     # Hence, we check licenses in both licenses and dist-info
     license_directories = (license_directory, distinfo)
@@ -396,6 +395,9 @@ def classify_paths(
                         # extension modules can have 2 suffixes
                         name = BuildrootPath(path.stem).stem
                         add_file_to_module(paths, name, "extension", "files", path)
+                    elif path.suffix == ".pyi":
+                        name = path.stem
+                        add_file_to_module(paths, name, "stub", "files", path)
                     elif path.suffix == ".py":
                         name = path.stem
                         # we add the .pyc files, but not top-level __pycache__
@@ -412,7 +414,7 @@ def classify_paths(
                     for parent in list(path.parents)[:index]:  # no direct slice until Python 3.10
                         add_file_to_module(paths, module_dir.name, "package", "dirs", parent)
                     is_lang = False
-                    if path.suffix == ".mo":
+                    if path.suffix == ".mo" or path.suffix == ".qm":
                         is_lang = add_lang_to_module(paths, module_dir.name, path)
                     if not is_lang:
                         if path.suffix == ".py":
@@ -425,7 +427,7 @@ def classify_paths(
                             add_file_to_module(paths, module_dir.name, "package", "files", path)
                 break
         else:
-            if path.suffix == ".mo":
+            if path.suffix == ".mo" or path.suffix == ".qm":
                 add_lang_to_module(paths, None, path) or paths["other"]["files"].append(path)
             else:
                 path = normalize_manpage_filename(prefix, path)
@@ -614,8 +616,10 @@ def generate_file_list(paths_dict, module_globs, include_others=False):
     # Users using '*' don't care about the files in the package, so it's ok
     # not to fail the build when no modules are detected
     # There can be legitimate reasons to create a package without Python modules
-    if not modules and fnmatch.fnmatchcase("", glob):
-        done_globs.add(glob)
+    if not modules:
+        for glob in module_globs:
+            if fnmatch.fnmatchcase("", glob):
+                done_globs.add(glob)
 
     missed = module_globs - done_globs
     if missed:
@@ -782,7 +786,7 @@ def dist_metadata(buildroot, record_path):
     return dist.metadata
 
 
-def pyproject_save_files_and_modules(buildroot, sitelib, sitearch, python_version, pyproject_record, prefix, assert_license, varargs):
+def pyproject_save_files_and_modules(buildroot, sitelib, sitearch, python_version, pyproject_record, prefix, assert_license, allow_no_modules, varargs):
     """
     Takes arguments from the %{pyproject_save_files} macro
 
@@ -797,6 +801,15 @@ def pyproject_save_files_and_modules(buildroot, sitelib, sitearch, python_versio
     sitedirs = sorted({sitelib, sitearch})
 
     globs, include_auto = parse_varargs(varargs)
+    if not globs and not allow_no_modules:
+        raise ValueError(
+            "At least one module glob needs to be provided to %pyproject_save_files. "
+            "Alternatively, use -M to indicate no Python modules should be saved."
+        )
+    if globs and allow_no_modules:
+        raise ValueError(
+            "%pyproject_save_files -M cannot be used together with module globs."
+        )
     parsed_records = load_parsed_record(pyproject_record)
 
     final_file_list = []
@@ -840,6 +853,7 @@ def main(cli_args):
         cli_args.pyproject_record,
         cli_args.prefix,
         cli_args.assert_license,
+        cli_args.allow_no_modules,
         cli_args.varargs,
     )
 
@@ -853,7 +867,7 @@ def argparser():
         prog="%pyproject_save_files",
         add_help=False,
         # custom usage to add +auto
-        usage="%(prog)s  [-l|-L] MODULE_GLOB [MODULE_GLOB ...] [+auto]",
+        usage="%(prog)s  [-l|-L] MODULE_GLOB|-M [MODULE_GLOB ...] [+auto]",
     )
     parser.add_argument(
         '--help', action='help',
@@ -878,7 +892,11 @@ def argparser():
         help="Don't fail when no License-File (PEP 639) is found (the default).",
     )
     parser.add_argument(
-        "varargs", nargs="+", metavar="MODULE_GLOB",
+        "-M", "--allow-no-modules", action="store_true", default=False,
+        help="Don't fail when no globs are provided, only include non-modules data in the generated filelist.",
+    )
+    parser.add_argument(
+        "varargs", nargs="*", metavar="MODULE_GLOB",
         help="Shell-like glob matching top-level module names to save into %%{pyproject_files}",
     )
     return parser

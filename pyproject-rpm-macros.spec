@@ -14,7 +14,7 @@ License:        MIT
 #   Increment Y and reset Z when new macros or features are added
 #   Increment Z when this is a bugfix or a cosmetic change
 # Dropping support for EOL Fedoras is *not* considered a breaking change
-Version:        1.15.1
+Version:        1.18.5
 Release:        1%{?dist}
 
 # Macro files
@@ -59,9 +59,9 @@ BuildRequires:  python3dist(packaging)
 BuildRequires:  python3dist(pip)
 BuildRequires:  python3dist(setuptools)
 %if %{with tox_tests}
-BuildRequires:  python3dist(tox-current-env) >= 0.0.6
+BuildRequires:  python3dist(tox-current-env) >= 0.0.16
 %endif
-BuildRequires:  python3dist(wheel)
+BuildRequires:  (python3dist(wheel) if python3dist(setuptools) < 71)
 BuildRequires:  (python3dist(tomli) if python3 < 3.11)
 %endif
 
@@ -137,15 +137,9 @@ install -pm 644 pyproject_construct_toxenv.py %{buildroot}%{_rpmconfigdir}/redha
 install -pm 644 pyproject_requirements_txt.py %{buildroot}%{_rpmconfigdir}/redhat/
 install -pm 644 pyproject_wheel.py %{buildroot}%{_rpmconfigdir}/redhat/
 
-%check
-# assert the two signatures of %%pyproject_buildrequires match exactly
-signature1="$(grep '^%%pyproject_buildrequires' macros.pyproject | cut -d' ' -f1)"
-signature2="$(grep '^%%pyproject_buildrequires' macros.aaa-pyproject-srpm | cut -d' ' -f1)"
-test "$signature1" == "$signature2"
-# but also assert we are not comparing empty strings
-test "$signature1" != ""
 
 %if %{with tests}
+%check
 export HOSTNAME="rpmbuild"  # to speedup tox in network-less mock, see rhbz#1856356
 %pytest -vv --doctest-modules %{?with_pytest_xdist:-n auto} %{!?with_tox_tests:-k "not tox"}
 
@@ -173,6 +167,63 @@ export HOSTNAME="rpmbuild"  # to speedup tox in network-less mock, see rhbz#1856
 
 
 %changelog
+* Thu Oct 16 2025 Miro Hrončok <mhroncok@redhat.com> - 1.18.5-1
+- %%pyproject_extras_subpkg: Only %%ghost the dist-info directory, not the content
+- That way, accidentally unpackaged files within are reported as errors
+- %%pyproject_save_files: Also save top level typing stub files (.pyi)
+
+* Mon Sep 01 2025 Miro Hrončok <mhroncok@redhat.com> - 1.18.4-1
+- Don't exit from pyproject-srpm-macros implementation of %%pyproject_buildrequires
+- Fixes: rhbz#2391290
+- On RPM 4.20+ don't put pyproject-macros-specific files in %%buildsubdir
+- Works around https://github.com/rpm-software-management/rpm/issues/3890
+- Speed %%pyproject_save_files up significantly
+
+* Fri Jul 25 2025 Fedora Release Engineering <releng@fedoraproject.org> - 1.18.3-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_43_Mass_Rebuild
+
+* Fri Jul 11 2025 Miro Hrončok <mhroncok@redhat.com> - 1.18.3-1
+- %%pyproject_buildrequires: Do not generate BuildRequires from Requires core metadata fields
+- That field is deprecated and should include importable module names, not distribution packages
+- Related: rhbz#2378463
+
+* Mon May 19 2025 Maxwell G <maxwell@gtmx.me> - 1.18.2-1
+- Fix handling of config_settings in %%pyproject_buildrequires
+
+* Fri Mar 21 2025 Miro Hrončok <mhroncok@redhat.com> - 1.18.1-1
+- Fix reverted conditional in %%pyproject_buildrequires -t/-e Fedora version comparison
+
+* Tue Mar 11 2025 Miro Hrončok <mhroncok@redhat.com> - 1.18.0-1
+- Make %%pyproject_buildrequires -t/-e and %%tox fail when no suitable tox configuration exists
+- The %%pyproject_buildrequires -t/-e case is temporarily allowed on Fedora 40-42
+- Requires tox-current-env >= 0.0.16
+
+* Thu Jan 30 2025 Miro Hrončok <miro@hroncok.cz> - 1.17.0-1
+- Add the -M flag to %%pyproject_save_files
+- The flag can be used to indicate no Python modules should be saved
+
+* Sat Jan 18 2025 Fedora Release Engineering <releng@fedoraproject.org> - 1.16.4-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_42_Mass_Rebuild
+
+* Tue Dec 03 2024 Miro Hrončok <mhroncok@redhat.com> - 1.16.4-1
+- Deprecate the provisional -w flag for %%pyproject_buildrequires
+
+* Tue Dec 03 2024 Miro Hrončok <mhroncok@redhat.com> - 1.16.3-1
+- Accept arbitrary options from %%pyproject_buildrequires in pyproject-srpm-macros
+- This will make future additions smoother
+
+* Wed Nov 13 2024 Miro Hrončok <mhroncok@redhat.com> - 1.16.2-1
+- Fix one remaining test for setuptools 70+
+
+* Thu Nov 07 2024 Miro Hrončok <miro@hroncok.cz> - 1.16.1-1
+- Support for setuptools 70+
+- wheel is no longer generated as a dependency of the default build system
+
+* Mon Nov 04 2024 Miro Hrončok <mhroncok@redhat.com> - 1.16.0-1
+- %%pyproject_buildrequires: Add support for dependency groups (PEP 735), via the -g flag
+- This is implied when used tox testenvs depend on dependency groups (requires tox 4.22+)
+- Fixes: rhbz#2318849
+
 * Thu Oct 03 2024 Karolina Surma <ksurma@redhat.com> - 1.15.1-1
 - Fix handling of self-referencing extras when reading pyproject.toml
 

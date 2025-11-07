@@ -2,8 +2,14 @@
 # For the main Python it's empty, for all others it's "-3.X"
 %_pyproject_files_pkgversion %{expr:"%{python3_pkgversion}" != "3" ? "-%{python3_pkgversion}" : ""}
 
+# In RPM < 4.20 (4.19.9x is 4.20 alpha), there is no guaranteed, RPM-controlled per-build directory (%%mkbuilddir step).
+# Hence we use %%{buildsubdir} if available.
+# On newer RPM 4.20+ this is no longer necessary and breaks the declarative buildsystem:
+#     https://github.com/rpm-software-management/rpm/issues/3890
+%_pyproject_buildsubdir_compat %[ v"0%{?rpmversion}" < v"4.19.90" ? "%{?buildsubdir:/%{buildsubdir}}" : ""]
+
 # This is a directory where wheels are stored and installed from, absolute
-%_pyproject_wheeldir %{_builddir}%{?buildsubdir:/%{buildsubdir}}/pyproject-wheeldir%{_pyproject_files_pkgversion}
+%_pyproject_wheeldir %{_builddir}%{_pyproject_buildsubdir_compat}/pyproject-wheeldir%{_pyproject_files_pkgversion}
 
 # This is a directory used as TMPDIR, where pip copies sources to and builds from, relative to PWD
 # For proper debugsource packages, we create TMPDIR within PWD
@@ -12,7 +18,7 @@
 # This will be used in debugsource package paths (applies to extension modules only)
 # NB: pytest collects tests from here if not hidden
 #     https://docs.pytest.org/en/latest/reference.html#confval-norecursedirs
-%_pyproject_builddir %{_builddir}%{?buildsubdir:/%{buildsubdir}}/.pyproject-builddir%{_pyproject_files_pkgversion}
+%_pyproject_builddir %{_builddir}%{_pyproject_buildsubdir_compat}/.pyproject-builddir%{_pyproject_files_pkgversion}
 
 # We prefix all created files with this value to make them unique
 # Ideally, we would put them into %%{buildsubdir}, but that value changes during the spec
@@ -75,7 +81,7 @@ echo $(IFS=:; echo "${pyproject_build_lib[*]}")
 
 %pyproject_install() %{expand:\\\
 specifier=$(ls %{_pyproject_wheeldir}/*.whl | xargs basename --multiple | sed -E 's/([^-]+)-([^-]+)-.+\\\.whl/\\\1==\\\2/')
-if [ -z $specifier ]; then
+if [ -z "$specifier" ]; then
   echo 'ERROR: %%%%pyproject_install found no wheel in %%%%{_pyproject_wheeldir} %{_pyproject_wheeldir}' >&2
   exit 1
 fi
@@ -97,7 +103,7 @@ fi
 # Process all *.dist-info dirs in sitelib/sitearch
 for site_dir in ${site_dirs[@]}; do
   for distinfo in %{buildroot}$site_dir/*.dist-info; do
-    echo "%ghost ${distinfo#%{buildroot}}" >> %{_pyproject_ghost_distinfo}
+    echo "%ghost %dir ${distinfo#%{buildroot}}" >> %{_pyproject_ghost_distinfo}
     sed -i 's/pip/rpm/' ${distinfo}/INSTALLER
     PYTHONPATH=%{_rpmconfigdir}/redhat \\
       %{__python3} -B %{_rpmconfigdir}/redhat/pyproject_preprocess_record.py \\
@@ -122,7 +128,7 @@ fi
 # https://github.com/rpm-software-management/rpm/issues/1749#issuecomment-1020420616
 # Since we support both ways, we pass either 4.19 or 4.18 to the script, so it knows which one to use
 # Rather than passing the actual version, we let RPM compare the versions, as it is easier done here than in Python
-%pyproject_save_files(lL) %{expand:\\\
+%pyproject_save_files(lLM) %{expand:\\\
 %{expr:v"0%{?rpmversion}" >= v"4.18.90" ? "RPM_FILES_ESCAPE=4.19" : "RPM_FILES_ESCAPE=4.18" } \\
 %{__python3} %{_rpmconfigdir}/redhat/pyproject_save_files.py \\
   --output-files "%{pyproject_files}" \\
@@ -158,9 +164,15 @@ fi
 %default_toxenv py%{python3_version_nodots}
 %toxenv %{default_toxenv}
 
+%_pyproject_tomlidep %["%{python3_pkgversion}" == "3"\
+    ? "echo '(python%{python3_pkgversion}dist(tomli) if python%{python3_pkgversion}-devel < 3.11)'"\
+    : "%[v"%{python3_pkgversion}" < v"3.11"\
+       ? "echo 'python%{python3_pkgversion}dist(tomli)'"\
+       : "true # will use tomllib, echo nothing"\
+    ]"\
+  ]
 
-# Note: Keep the options in sync with this macro from macros.aaa-pyproject-srpm
-%pyproject_buildrequires(rRxtNwpe:C:) %{expand:\\\
+%pyproject_buildrequires(rRxtNwpe:g:C:) %{expand:\\\
 %_set_pytest_addopts
 # The default flags expect the package note file to exist
 # see https://bugzilla.redhat.com/show_bug.cgi?id=2097535
@@ -181,8 +193,15 @@ fi
 %{-w:%{error:The -N and -w options are mutually exclusive}}
 %{-p:%{error:The -N and -p options are mutually exclusive}}
 %{-C:%{error:The -N and -C options are mutually exclusive}}
+%{-g:if [ -f pyproject.toml ]; then
+  %_pyproject_tomlidep
+fi}
 }
 %{-w:
+%{!?__pyproject_buildrequires_w_warned:%{warn:The %%pyproject_buildrequires -w option is deprecated.
+It's not efficient to build the wheel several times during the build.
+The option is not scheduled for removal, but packagers should use the -p option instead.
+}%global __pyproject_buildrequires_w_warned 1}
 %{-p:%{error:The -w and -p options are mutually exclusive}}
 }
 %{-e:%{expand:%global toxenv %(%{__python3} -s %{_rpmconfigdir}/redhat/pyproject_construct_toxenv.py %{?**})}}
@@ -191,17 +210,10 @@ echo 'python%{python3_pkgversion}-devel'
 echo 'python%{python3_pkgversion}dist(packaging)'
 %{!-N:echo 'python%{python3_pkgversion}dist(pip) >= 19'
 if [ -f pyproject.toml ]; then
-  %["%{python3_pkgversion}" == "3"
-    ? "echo '(python%{python3_pkgversion}dist(tomli) if python%{python3_pkgversion}-devel < 3.11)'"
-    : "%[v"%{python3_pkgversion}" < v"3.11"
-       ? "echo 'python%{python3_pkgversion}dist(tomli)'"
-       : "true # will use tomllib, echo nothing"
-    ]"
-  ]
+  %_pyproject_tomlidep
 elif [ -f setup.py ]; then
   # Note: If the default requirements change, also change them in the script!
   echo 'python%{python3_pkgversion}dist(setuptools) >= 40.8'
-  echo 'python%{python3_pkgversion}dist(wheel)'
 else
   echo 'ERROR: Neither pyproject.toml nor setup.py found, consider using %%%%pyproject_buildrequires -N <requirements-file> if this is not a Python package.' >&2
   exit 1
@@ -213,7 +225,7 @@ if [ -f %{__python3} ]; then
   echo -n > %{_pyproject_buildrequires}
   %{_pyproject_build_flags} \\\
   TMPDIR="%{_pyproject_builddir}" \\\
-  RPM_TOXENV="%{toxenv}" HOSTNAME="rpmbuild" %{__python3} -Bs %{_rpmconfigdir}/redhat/pyproject_buildrequires.py %{?!_python_no_extras_requires:--generate-extras} --python3_pkgversion %{python3_pkgversion} --wheeldir %{_pyproject_wheeldir} --output %{_pyproject_buildrequires} %{?**} >&2
+  RPM_TOXENV="%{toxenv}" FEDORA=%{?fedora} HOSTNAME="rpmbuild" %{__python3} -Bs %{_rpmconfigdir}/redhat/pyproject_buildrequires.py %{?!_python_no_extras_requires:--generate-extras} --python3_pkgversion %{python3_pkgversion} --wheeldir %{_pyproject_wheeldir} --output %{_pyproject_buildrequires} %{?**} >&2
   cat %{_pyproject_buildrequires}
 fi
 # Incomplete .dist-info dir might confuse importlib.metadata
@@ -228,7 +240,7 @@ PATH="%{buildroot}%{_bindir}:$PATH" \\
 PYTHONPATH="${PYTHONPATH:-%{buildroot}%{python3_sitearch}:%{buildroot}%{python3_sitelib}}" \\
 %{?__pytest_addopts:PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} %{__pytest_addopts}"}} \\
 HOSTNAME="rpmbuild" \\
-%{__python3} -m tox --current-env -q --recreate -e "%{-e:%{-e*}}%{!-e:%{toxenv}}" %{?*}
+%{__python3} -m tox --current-env --assert-config -q --recreate -e "%{-e:%{-e*}}%{!-e:%{toxenv}}" %{?*}
 }
 
 

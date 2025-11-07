@@ -2,7 +2,7 @@ Name:           double-install
 Version:        0
 Release:        0%{?dist}
 Summary:        Install 2 wheels
-License:        BSD and MIT
+License:        BSD-3-Clause AND MIT
 %global         markupsafe_version 2.0.1
 %global         tldr_version 0.4.4
 Source1:        https://github.com/pallets/markupsafe/archive/%{markupsafe_version}/MarkupSafe-%{markupsafe_version}.tar.gz
@@ -39,20 +39,17 @@ cd ..
 
 
 %install
+(
 # This should install both the wheels:
 %pyproject_install
+) 2>&1 | tee install.log
 #pyproject_save_files is not possible with 2 dist-infos
 
 
 %check
 # Internal check for the value of %%{pyproject_build_lib}
-%if 0%{?rhel} == 9
-for dir in . markupsafe-%{markupsafe_version} tldr-%{tldr_version}; do
-  (cd $dir && test "%{pyproject_build_lib}" == "$(echo %{_pyproject_builddir}/pip-req-build-*/build/lib.%{python3_platform}-%{python3_version}):$(echo %{_pyproject_builddir}/pip-req-build-*/build/lib)")
-done
-%else
 cd markupsafe-%{markupsafe_version}
-%if 0%{?fedora} == 36
+%if 0%{?rhel} == 9
 test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/markupsafe-%{markupsafe_version}/build/lib.%{python3_platform}-%{python3_version}"
 %else
 test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/markupsafe-%{markupsafe_version}/build/lib.%{python3_platform}-cpython-%{python3_version_nodots}"
@@ -60,12 +57,14 @@ test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/markupsafe-%{marku
 cd ../tldr-%{tldr_version}
 test "%{pyproject_build_lib}" == "%{_builddir}/%{buildsubdir}/tldr-%{tldr_version}/build/lib"
 cd ..
-%endif
+# Internal regression check for %%pyproject_install with multiple wheels
+grep 'binary operator expected' install.log && exit 1 || true
+grep 'too many arguments' install.log && exit 1 || true
 
 
 %files
 %{_bindir}/tldr*
 %pycached %{python3_sitelib}/tldr.py
 %{python3_sitelib}/tldr-%{tldr_version}.dist-info/
-%{python3_sitearch}/MarkupSafe-%{markupsafe_version}.dist-info/
+%{python3_sitearch}/[Mm]arkup[Ss]afe-%{markupsafe_version}.dist-info/
 %{python3_sitearch}/markupsafe/

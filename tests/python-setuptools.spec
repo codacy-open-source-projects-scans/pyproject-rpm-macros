@@ -1,7 +1,7 @@
 Name:           python-setuptools
 # on the CI we test different version of setuptools on different Fedora versions
 # don't package software like this in Fedora please
-%if 0%{?fedora} || 0%{?rhel} >= 10
+%if 0%{?rhel} != 9
 Version:        67.7.2
 %else
 Version:        59.6.0
@@ -9,16 +9,12 @@ Version:        59.6.0
 Release:        0%{?dist}
 Summary:        Easily build and distribute Python packages
 # see the real Fedora package for explanation:
-License:        MIT and (BSD or ASL 2.0)
+License:        MIT AND (BSD-2-Clause OR Apache-2.0)
 URL:            https://pypi.python.org/pypi/setuptools
 Source:         %{pypi_source setuptools %{version}}
 
 # Patch from Fedora proper
-%if 0%{?fedora} || 0%{?rhel} >= 10
-Patch:          https://src.fedoraproject.org/rpms/python-setuptools/raw/8ae9b2a777c/f/Remove-optional-or-unpackaged-test-deps.patch
-%else
-Patch:          https://src.fedoraproject.org/rpms/python-setuptools/raw/6fc093d6b3d/f/0001-Remove-optional-or-unpackaged-test-deps.patch
-%endif
+Patch:          python-setuptools-%{version}-remove-optional-or-unpackaged-test-deps.patch
 
 BuildArch:      noarch
 
@@ -54,7 +50,7 @@ Summary:        %{summary}
 %prep
 %autosetup -p1 -n setuptools-%{version}
 
-%if 0%{?rhel} && 0%{?rhel} < 10
+%if 0%{?rhel} == 9
 # The following test deps are optional and either not desired or not available in Fedora:
 sed -Ei setup.cfg -e  '/\bpytest-(checkdocs|black|cov|mypy|enabler)\b/d' \
                   -e  '/\bflake8\b/d' \

@@ -11,6 +11,14 @@ from pyproject_buildrequires import generate_requires, load_pyproject
 SETUPTOOLS_VERSION = packaging.version.parse(setuptools.__version__)
 SETUPTOOLS_60 = SETUPTOOLS_VERSION >= packaging.version.parse('60')
 
+try:
+    import tox
+except ImportError:
+    TOX_4_22 = False
+else:
+    TOX_VERSION = packaging.version.parse(tox.__version__)
+    TOX_4_22 = TOX_VERSION >= packaging.version.parse('4.22')
+
 testcases = {}
 with Path(__file__).parent.joinpath('pyproject_buildrequires_testcases.yaml').open() as f:
     testcases = yaml.safe_load(f)
@@ -71,6 +79,7 @@ def test_data(case_name, capfd, tmp_path, monkeypatch):
             build_wheel=case.get('build_wheel', False),
             wheeldir=str(wheeldir),
             extras=case.get('extras', []),
+            dependency_groups=case.get('dependency_groups', []),
             toxenv=case.get('toxenv', None),
             generate_extras=case.get('generate_extras', False),
             requirement_files=requirement_files,
@@ -93,15 +102,15 @@ def test_data(case_name, capfd, tmp_path, monkeypatch):
         assert 'expected' in case or 'stderr_contains' in case
 
         out, err = capfd.readouterr()
-        dependencies = output.read_text()
+        dependencies = sorted(output.read_text().splitlines())
 
         if 'expected' in case:
             expected = case['expected']
             if isinstance(expected, list):
                 # at least one of them needs to match
-                assert dependencies in expected
+                assert dependencies in [sorted(e.splitlines()) for e in expected]
             else:
-                assert dependencies == expected
+                assert dependencies == sorted(expected.splitlines())
 
         # stderr_contains may be a string or list of strings
         stderr_contains = case.get('stderr_contains')
