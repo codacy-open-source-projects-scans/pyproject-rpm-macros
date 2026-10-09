@@ -1,5 +1,5 @@
 Name:           python-ipykernel
-Version:        6.11.0
+Version:        6.30.0
 Release:        0%{?dist}
 Summary:        IPython Kernel for Jupyter
 License:        BSD-3-Clause
@@ -36,17 +36,27 @@ Summary:        %{summary}
 %pyproject_patch_dependency debugpy:ignore
 
 %generate_buildrequires
-%pyproject_buildrequires -r
+%pyproject_buildrequires --runtime
 
 %build
 %pyproject_wheel
 
 %install
 %pyproject_install
-%pyproject_save_files -l 'ipykernel*' +auto
+%pyproject_save_files --assert-license 'ipykernel*' --auto
 
 %check
-%pyproject_check_import  -e '*.test*' -e 'ipykernel.gui*' -e 'ipykernel.pylab.*' -e 'ipykernel.trio*' -e 'ipykernel.datapub' -e 'ipykernel.pickleutil' -e 'ipykernel.serialize'
+# The global definition here serves as as a regression test
+# for option parsing bug fixed in 2acda15.
+# Use case extracted from python-pylero-0.1.1-6.fc44,
+# enhanced with combining short and long options.
+%global _check_import_excludes %{expand:
+-e '*.test*' --exclude 'ipykernel.gui*'
+--exclude 'ipykernel.pylab.*' -e 'ipykernel.trio*'
+-e 'ipykernel.datapub' --exclude 'ipykernel.pickleutil'
+-e 'ipykernel.serialize'
+}
+%pyproject_check_import %_check_import_excludes
 
 %files -n python3-ipykernel -f %{pyproject_files}
 %doc README.md

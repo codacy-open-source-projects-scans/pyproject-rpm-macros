@@ -20,20 +20,23 @@ Summary:        %{summary}
 %description -n python3-markdown-it-py
 ...
 
-%pyproject_extras_subpkg -n python3-markdown-it-py linkify
+%pyproject_extras_subpkg --name python3-markdown-it-py linkify
 
 %prep
 %autosetup -p1 -n markdown-it-py-%{version}
 
+# This package builds successfully with flit-core 4
+%pyproject_patch_dependency flit_core:set_upper:5
+
 %generate_buildrequires
-%pyproject_buildrequires -x testing,linkify -p
+%pyproject_buildrequires --extras testing,linkify --pyproject-dependencies
 
 %build
 %pyproject_wheel
 
 %install
 %pyproject_install
-%pyproject_save_files markdown_it -L
+%pyproject_save_files markdown_it --no-assert-license
 
 %check
 # sphinx-copybutton is in [rtd] extra, should not appear

@@ -22,14 +22,14 @@ from pyproject_wheel import parse_config_settings_args
 # Allow only the forms we know we can handle.
 VERSION_RE = re.compile(r'[a-zA-Z0-9.-]+(\.\*)?')
 
-# To avoid breakage on Fedora 40-42,
-# we don't assert tox configuration there.
-# This can be removed when Fedora 42 goes EOL.
-# Note that %tox still uses --assert-config
-# because %tox without config is dangerous (false sense of tests).
-# Running %pyproject_buildrequires -t/-e without tox config is wrong, but not dangerous.
 FEDORA = int(os.getenv('FEDORA') or 0)
-TOX_ASSERT_CONFIG_OPTS = () if 40 <= FEDORA < 43 else ('--assert-config',)
+RHEL = int(os.getenv('RHEL') or 0)
+
+# To avoid breakage on Fedora < 45 and RHEL < 11
+# we don't compare extras listed in %pyproject_buildrequires -x
+# with upstream metadata.
+# Instead we issue warning on old releases.
+REJECT_INVALID_EXTRAS = FEDORA >= 45 or RHEL >= 11
 
 
 class EndPass(Exception):
@@ -88,6 +88,7 @@ class Requirements:
         self.get_installed_version = get_installed_version
         self.output_lines = []
         self.extras = set()
+        self.extras_ok_nonexisting = set()
 
         if extras:
             for extra in extras:
@@ -100,11 +101,18 @@ class Requirements:
         self.python3_pkgversion = python3_pkgversion
         self.config_settings = config_settings
         self.dependency_overrides = self._parse_dependency_overrides(dependency_overrides or [])
+        self.metadata_extras = []
 
         self.package_name = None
 
-    def add_extras(self, *extras):
-        self.extras |= set(e.strip() for e in extras)
+    def add_extras(self, *extras, error_nonexisting=None):
+        if error_nonexisting is None:
+            error_nonexisting = REJECT_INVALID_EXTRAS
+        new_extras = set(canonicalize_name(e.strip()) for e in extras if e.strip())
+        self.extras |= new_extras
+        if not error_nonexisting:
+            self.extras_ok_nonexisting |= new_extras
+        return new_extras
 
     def _parse_dependency_overrides(self, overrides):
         """Parse dependency override specifications into a structured format.
@@ -124,30 +132,24 @@ class Requirements:
 
         return parsed_overrides
 
-    @staticmethod
-    def _base_package_name(package_name):
-        """Extract base package name, stripping any extras like [extra1]."""
-        bracket = package_name.find('[')
-        if bracket != -1:
-            package_name = package_name[:bracket]
-        return canonicalize_name(package_name)
-
     def _should_ignore_dependency(self, package_name):
         """Check if a dependency should be completely ignored."""
-        package_name = self._base_package_name(package_name)
         if package_name not in self.dependency_overrides:
             return False
         return any(o['action'] == 'ignore' for o in self.dependency_overrides[package_name])
 
-    def _apply_dependency_overrides(self, package_name, specifiers):
+    def _apply_dependency_overrides(self, requirement):
         """Apply dependency overrides to a list of specifiers for a given package."""
-        package_name = self._base_package_name(package_name)
+        package_name = canonicalize_name(requirement.name)
         if package_name not in self.dependency_overrides:
-            return specifiers
+            return requirement
 
-        return apply_overrides_to_specifiers(
-            specifiers, self.dependency_overrides[package_name],
+        overridden = apply_overrides_to_specifiers(
+            requirement.specifier, self.dependency_overrides[package_name],
             package_name=package_name, log_fn=print_err)
+
+        requirement.specifier = SpecifierSet(','.join(str(s) for s in overridden))
+        return requirement
 
     @property
     def marker_envs(self):
@@ -227,11 +229,8 @@ class Requirements:
 
         # Apply dependency overrides before the installed-version check,
         # so the check reflects the constraints we will actually output.
-        if self._base_package_name(name) in self.dependency_overrides:
-            overridden = self._apply_dependency_overrides(
-                name, list(requirement.specifier))
-            requirement.specifier = SpecifierSet(
-                ','.join(str(s) for s in overridden))
+        requirement = self._apply_dependency_overrides(requirement)
+        requirement_str = str(requirement)
 
         # We need to always accept pre-releases as satisfying the requirement
         # Otherwise e.g. installed cffi version 1.15.0rc2 won't even satisfy the requirement for "cffi"
@@ -388,11 +387,17 @@ def package_name_from_parsed_metadata_file(message):
     return message.get('name')
 
 
-def package_name_and_requires_from_metadata_file(metadata_file):
+def extras_from_parsed_metadata_file(message):
+    raw_extras = message.get_all('provides-extra') or []
+    return [canonicalize_name(extra) for extra in raw_extras if extra]
+
+
+def extract_data_from_metadata_file(metadata_file):
     message = parse_metadata_file(metadata_file)
     package_name = package_name_from_parsed_metadata_file(message)
+    extras_names = extras_from_parsed_metadata_file(message)
     requires = requires_from_parsed_metadata_file(message)
-    return package_name, requires
+    return package_name, requires, extras_names
 
 
 def generate_run_requirements_hook(backend, requirements):
@@ -408,8 +413,9 @@ def generate_run_requirements_hook(backend, requirements):
         )
     dir_basename = prepare_metadata('.', requirements.config_settings)
     with open(dir_basename + '/METADATA') as metadata_file:
-        name, requires = package_name_and_requires_from_metadata_file(metadata_file)
+        name, requires, metadata_extras = extract_data_from_metadata_file(metadata_file)
         requirements.set_package_name(name)
+        requirements.metadata_extras.extend(metadata_extras)
         for key, req in requires.items():
             requirements.extend(req,
                                 source=f'hook generated metadata: {key} ({requirements.package_name})')
@@ -451,8 +457,9 @@ def generate_run_requirements_wheel(backend, requirements, wheeldir):
         for name in wheelfile.namelist():
             if name.count('/') == 1 and name.endswith('.dist-info/METADATA'):
                 with io.TextIOWrapper(wheelfile.open(name), encoding='utf-8') as metadata_file:
-                    name, requires = package_name_and_requires_from_metadata_file(metadata_file)
+                    name, requires, metadata_extras = extract_data_from_metadata_file(metadata_file)
                     requirements.set_package_name(name)
+                    requirements.metadata_extras.extend(metadata_extras)
                     for key, req in requires.items():
                         requirements.extend(req,
                                             source=f'built wheel metadata: {key} ({name})')
@@ -483,10 +490,11 @@ def generate_run_requirements_pyproject(requirements):
         requirements.extend(dependencies,
                             source=f'pyproject.toml generated metadata: [optional-dependencies] {extra} ({name})',
                             extra=extra)
+        requirements.metadata_extras.append(canonicalize_name(extra))
 
 
-def generate_run_requirements(backend, requirements, *, build_wheel, read_pyproject_dependencies, wheeldir):
-    if read_pyproject_dependencies:
+def generate_run_requirements(backend, requirements, *, build_wheel, pyproject_dependencies, wheeldir):
+    if pyproject_dependencies:
         generate_run_requirements_pyproject(requirements)
     elif build_wheel:
         generate_run_requirements_wheel(backend, requirements, wheeldir)
@@ -506,7 +514,7 @@ def generate_tox_requirements(toxenv, requirements):
              '--print-deps-to', deps.name,
              '--print-extras-to', extras.name,
              '--no-provision', provision.name,
-             *TOX_ASSERT_CONFIG_OPTS,
+             '--assert-config',
              '-q', '-r', '-e', toxenv],
             check=False,
             encoding='utf-8',
@@ -534,7 +542,7 @@ def generate_tox_requirements(toxenv, requirements):
 
         tox_extras = {e for e in extras.read().splitlines() if e}
         if not (tox_extras <= requirements.extras):
-            requirements.add_extras(*tox_extras)
+            requirements.add_extras(*tox_extras, error_nonexisting=False)
             requirements.readd_ignored_alien_requirements(source=f'tox added extras: {toxenv}')
 
         deplines = deps.read().splitlines()
@@ -655,7 +663,7 @@ def generate_requires(
     *, include_runtime=False, build_wheel=False, wheeldir=None, toxenv=None, extras=None, dependency_groups=None,
     get_installed_version=importlib.metadata.version,  # for dep injection
     generate_extras=False, python3_pkgversion="3", requirement_files=None, use_build_system=True,
-    read_pyproject_dependencies=False,
+    pyproject_dependencies=False,
     output, config_settings=None, dependency_overrides=None,
 ):
     """Generate the BuildRequires for the project in the current directory
@@ -674,13 +682,13 @@ def generate_requires(
 
     dependency_groups = dependency_groups or []
     try:
-        if (include_runtime or toxenv or read_pyproject_dependencies) and not use_build_system:
+        if (include_runtime or toxenv or pyproject_dependencies) and not use_build_system:
             raise ValueError('-N option cannot be used in combination with -r, -e, -t, -x, -p options')
         if requirement_files:
             for req_file in requirement_files:
                 requirements.extend(
-                    convert_requirements_txt(req_file, pathlib.Path(req_file.name)),
-                    source=f'requirements file {req_file.name}'
+                    convert_requirements_txt(req_file.read_text().splitlines(), req_file),
+                    source=f'requirements file {req_file}'
                 )
             requirements.check(source='all requirements files')
         if use_build_system:
@@ -688,19 +696,32 @@ def generate_requires(
             generate_build_requirements(backend, requirements)
         if include_runtime or toxenv:
             generate_run_requirements(backend, requirements, build_wheel=build_wheel,
-                read_pyproject_dependencies=read_pyproject_dependencies, wheeldir=wheeldir)
+                pyproject_dependencies=pyproject_dependencies, wheeldir=wheeldir)
         if toxenv:
             generate_tox_requirements(toxenv, requirements)
             dependency_groups.extend(tox_dependency_groups(toxenv))
         if dependency_groups:
             generate_dependency_groups(dependency_groups, requirements)
+        if include_runtime:
+            for extra in requirements.extras:
+                if extra not in requirements.metadata_extras:
+                    if extra in requirements.extras_ok_nonexisting:
+                        print_err(
+                            f'WARNING: Extra {extra!r} not found in project metadata. '
+                            f'Available extras: {requirements.metadata_extras}. '
+                        )
+                    else:
+                        raise ValueError(
+                            f'Extra {extra} does not exist in upstream metadata. '
+                            f'Available extras: {requirements.metadata_extras}.'
+                        )
     except EndPass:
         return
     finally:
         output.write_text(os.linesep.join(requirements.output_lines) + os.linesep)
 
 
-def main(argv):
+def argparser():
     parser = argparse.ArgumentParser(
         description='Generate BuildRequires for a Python project.',
         prog='%pyproject_buildrequires',
@@ -756,7 +777,7 @@ def main(argv):
               '(useful for build backends without the prepare_metadata_for_build_wheel hook, deprecated)'),
     )
     parser.add_argument(
-        '-p', '--read-pyproject-dependencies', action='store_true', default=False,
+        '-p', '--pyproject-dependencies', action='store_true', default=False,
         help=('Generate dependencies from [project] table of pyproject.toml '
               'instead of calling prepare_metadata_for_build_wheel hook)'),
     )
@@ -769,23 +790,31 @@ def main(argv):
         action='store_false', help='Use -N to indicate that project does not use any build system',
     )
     parser.add_argument(
-        'requirement_files', nargs='*', type=argparse.FileType('r'),
+        'requirement_files', nargs='*', type=pathlib.Path,
         metavar='REQUIREMENTS.TXT',
         help=('Add buildrequires from file'),
     )
     parser.add_argument(
-        '-C',
+        '-C', '--config-settings',
         dest='config_settings',
         action='append',
         help='Configuration settings to pass to the PEP 517 backend',
     )
-    parser.add_argument('-d', help=argparse.SUPPRESS)  # processed by RPM macro
     parser.add_argument(
         '--dep-overrides-file', type=pathlib.Path, default=None,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument('-d', '--directory', help=argparse.SUPPRESS)  # processed by RPM macro
+    return parser
 
+
+def main(argv):
+    parser = argparser()
     args = parser.parse_args(argv)
+
+    for req_file in args.requirement_files:
+        if not req_file.exists():
+            parser.error(f"can't open '{req_file}': No such file or directory")
 
     if not args.use_build_system:
         args.runtime = False
@@ -822,7 +851,7 @@ def main(argv):
             python3_pkgversion=args.python3_pkgversion,
             requirement_files=args.requirement_files,
             use_build_system=args.use_build_system,
-            read_pyproject_dependencies=args.read_pyproject_dependencies,
+            pyproject_dependencies=args.pyproject_dependencies,
             output=args.output,
             config_settings=parse_config_settings_args(args.config_settings),
             dependency_overrides=dependency_overrides,

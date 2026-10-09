@@ -1,5 +1,8 @@
 """Unit tests for dependency override functionality."""
 
+import subprocess
+import sys
+
 import pytest
 
 from packaging.requirements import Requirement
@@ -45,6 +48,56 @@ class TestParseOverrideString:
     def test_invalid_version(self):
         with pytest.raises(ValueError, match='Invalid version'):
             parse_override_string('pkg:set_upper:not_a_version!!!')
+
+
+# ---- CLI validation (pyproject_dependency_overrides.py __main__) ----
+
+SCRIPT = 'pyproject_dependency_overrides.py'
+
+
+class TestCLIValidation:
+    def _run(self, arg):
+        return subprocess.run(
+            [sys.executable, '-Bs', SCRIPT, arg],
+            capture_output=True, text=True,
+        )
+
+    def test_valid_drop_upper(self):
+        assert self._run('numpy:drop_upper').returncode == 0
+
+    def test_valid_set_upper(self):
+        assert self._run('numpy:set_upper:2.0').returncode == 0
+
+    def test_valid_ignore_br_only(self):
+        assert self._run('pkg:ignore:br_only').returncode == 0
+
+    def test_valid_set_lower_br_only(self):
+        assert self._run('pkg:set_lower:1.0:br_only').returncode == 0
+
+    def test_invalid_no_colon(self):
+        r = self._run('justpackage')
+        assert r.returncode == 1
+        assert 'Invalid dependency override format' in r.stderr
+
+    def test_invalid_action(self):
+        r = self._run('pkg:bogus')
+        assert r.returncode == 1
+        assert 'Invalid dependency override action' in r.stderr
+
+    def test_set_upper_missing_value(self):
+        r = self._run('pkg:set_upper')
+        assert r.returncode == 1
+        assert 'requires a value' in r.stderr
+
+    def test_drop_upper_rejects_value(self):
+        r = self._run('pkg:drop_upper:2.0')
+        assert r.returncode == 1
+        assert 'does not accept a value' in r.stderr
+
+    def test_invalid_version(self):
+        r = self._run('pkg:set_upper:not_a_version!!!')
+        assert r.returncode == 1
+        assert 'Invalid version' in r.stderr
 
 
 # ---- apply_overrides_to_specifiers (shared module) ----
@@ -277,22 +330,6 @@ class TestParseDependencyOverrides:
             self._parse(['pkg:ignore:somevalue'])
 
 
-# ---- Requirements._base_package_name ----
-
-class TestBasePackageName:
-    def test_simple_name(self):
-        assert Requirements._base_package_name('requests') == 'requests'
-
-    def test_with_extras(self):
-        assert Requirements._base_package_name('requests[security]') == 'requests'
-
-    def test_normalization(self):
-        assert Requirements._base_package_name('My_Package') == 'my-package'
-
-    def test_with_extras_and_normalization(self):
-        assert Requirements._base_package_name('My_Package[extra]') == 'my-package'
-
-
 # ---- Requirements._should_ignore_dependency ----
 
 class TestShouldIgnoreDependency:
@@ -322,81 +359,75 @@ class TestApplyDependencyOverrides:
             raise Exception('not installed')
         return Requirements(mock_version, dependency_overrides=overrides)
 
-    def _specs(self, spec_str):
-        return list(SpecifierSet(spec_str))
-
     def test_no_overrides(self):
         r = self._make_req([])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 2
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        assert len(list(result.specifier)) == 2
 
     def test_drop_upper(self):
         r = self._make_req(['numpy:drop_upper'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 1
-        assert result[0].operator == '>='
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '>='
 
     def test_drop_lower(self):
         r = self._make_req(['numpy:drop_lower'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 1
-        assert result[0].operator == '<'
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '<'
 
     def test_drop_constraints(self):
         r = self._make_req(['numpy:drop_constraints'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert result == []
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        assert list(result.specifier) == []
 
     def test_set_upper(self):
         r = self._make_req(['numpy:set_upper:3.0'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 2
-        ops = {s.operator for s in result}
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 2
+        ops = {s.operator for s in specs}
         assert '>=' in ops
         assert '<' in ops
-        upper = [s for s in result if s.operator == '<'][0]
+        upper = [s for s in specs if s.operator == '<'][0]
         assert upper.version == '3.0'
 
     def test_set_lower(self):
         r = self._make_req(['numpy:set_lower:0.5'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 2
-        ops = {s.operator for s in result}
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 2
+        ops = {s.operator for s in specs}
         assert '>=' in ops
         assert '<' in ops
-        lower = [s for s in result if s.operator == '>='][0]
+        lower = [s for s in specs if s.operator == '>='][0]
         assert lower.version == '0.5'
 
     def test_drop_upper_decomposes_pin(self):
         """drop_upper on == decomposes to >= (keeps lower half)."""
         r = self._make_req(['attrs:drop_upper'])
-        specs = self._specs('==25.3.0')
-        result = r._apply_dependency_overrides('attrs', specs)
-        assert len(result) == 1
-        assert result[0].operator == '>='
-        assert result[0].version == '25.3.0'
+        result = r._apply_dependency_overrides(Requirement('attrs==25.3.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '>='
+        assert specs[0].version == '25.3.0'
 
     def test_drop_lower_decomposes_pin(self):
         """drop_lower on == decomposes to <= (keeps upper half)."""
         r = self._make_req(['attrs:drop_lower'])
-        specs = self._specs('==25.3.0')
-        result = r._apply_dependency_overrides('attrs', specs)
-        assert len(result) == 1
-        assert result[0].operator == '<='
-        assert result[0].version == '25.3.0'
+        result = r._apply_dependency_overrides(Requirement('attrs==25.3.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '<='
+        assert specs[0].version == '25.3.0'
 
     def test_drop_upper_preserves_exclusions(self):
         """!= exclusions are always preserved."""
         r = self._make_req(['pkg:drop_upper'])
-        specs = self._specs('>=1.0,!=1.5,<3.0')
-        result = r._apply_dependency_overrides('pkg', specs)
-        ops = [s.operator for s in result]
+        result = r._apply_dependency_overrides(Requirement('pkg>=1.0,!=1.5,<3.0'))
+        ops = [s.operator for s in result.specifier]
         assert '>=' in ops
         assert '!=' in ops
         assert '<' not in ops
@@ -404,31 +435,29 @@ class TestApplyDependencyOverrides:
     def test_ignore_action_passthrough(self):
         """ignore action is handled separately; _apply_dependency_overrides skips it."""
         r = self._make_req(['pkg:ignore'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('pkg', specs)
-        assert len(result) == 2
+        result = r._apply_dependency_overrides(Requirement('pkg>=1.0,<2.0'))
+        assert len(list(result.specifier)) == 2
 
     def test_unrelated_package_not_affected(self):
         r = self._make_req(['other:drop_upper'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy', specs)
-        assert len(result) == 2
+        result = r._apply_dependency_overrides(Requirement('numpy>=1.0,<2.0'))
+        assert len(list(result.specifier)) == 2
 
     def test_extras_stripped_for_lookup(self):
         r = self._make_req(['numpy:drop_upper'])
-        specs = self._specs('>=1.0,<2.0')
-        result = r._apply_dependency_overrides('numpy[extra1]', specs)
-        assert len(result) == 1
-        assert result[0].operator == '>='
+        result = r._apply_dependency_overrides(Requirement('numpy[extra1]>=1.0,<2.0'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '>='
 
     def test_drop_upper_decomposes_tilde(self):
         """drop_upper on ~= decomposes to >= (PEP 440: ~=V.N is >=V.N, ==V.*)."""
         r = self._make_req(['pkg:drop_upper'])
-        specs = self._specs('~=1.4')
-        result = r._apply_dependency_overrides('pkg', specs)
-        assert len(result) == 1
-        assert result[0].operator == '>='
-        assert result[0].version == '1.4'
+        result = r._apply_dependency_overrides(Requirement('pkg~=1.4'))
+        specs = list(result.specifier)
+        assert len(specs) == 1
+        assert specs[0].operator == '>='
+        assert specs[0].version == '1.4'
 
 
 # ---- pyproject_patch_metadata ----
