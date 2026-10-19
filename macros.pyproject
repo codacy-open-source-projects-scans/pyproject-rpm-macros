@@ -211,8 +211,8 @@ if [ ! -f "%{_pyproject_modules %{?__pyproject_optflag_D}}" ]; then
   _modules_glob=( %{_pyproject_modules_base}-* )
   if [ -e "${_modules_glob[0]}" ]; then
     _available=$(printf '%%s\n' "${_modules_glob[@]}" | sed 's|.*-pyproject-modules-||' | tr '\n' ' ')
-    echo "ERROR: %%%%pyproject_check_import requires -D <name> when %%%%pyproject_save_files was called with -D" >&2
-    echo "Available -D values: ${_available}" >&2
+    echo "ERROR: %%%%pyproject_check_import requires -D/--dist-name <name> when %%%%pyproject_save_files was called with -D/--dist-name" >&2
+    echo "Available -D/--dist-name values: ${_available}" >&2
   else
     echo 'ERROR: %%%%pyproject_check_import only works when %%%%pyproject_save_files is used' >&2
   fi
@@ -234,6 +234,21 @@ else\
   %pyproject_check_import %{?**}\
 fi\
 %{__pyproject_getopt_restore}
+
+
+# Compares the spec %%license tag (or an explicitly given expression) against
+# the upstream PEP 639 project.license string in pyproject.toml, failing the
+# build on any mismatch or ambiguity.
+%pyproject_verify_license(-) \
+%{lua:require("fedora.rpm.pyproject_getopt").getopt({
+    {short="d", long="directory", value=true},
+})}\
+%{expand:\\\
+%{?__pyproject_opt_d:pushd "%{__pyproject_opt_d}"}
+%{__python3} -Bs %{_rpmconfigdir}/redhat/pyproject_verify_license.py \\
+  '%{?__pyproject_positional_args}%{!?__pyproject_positional_args:%{license}}'
+%{?__pyproject_opt_d:popd}
+%{__pyproject_getopt_restore}}
 
 
 %default_toxenv py%{python3_version_nodots}
